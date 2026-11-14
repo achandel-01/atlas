@@ -407,11 +407,14 @@ public class SerialEntityProcessor implements NotificationEntityProcessor {
         AtlasPerfTracer                     perf                  = null;
         AtlasKafkaMessage<HookNotification> kafkaMsg              = ticket.getMessage();
         HookNotification                    message               = kafkaMsg.getMessage();
+        String                              ingestionMessageType  = message.getType().name();
+        String                              metadataSource        = getMetadataSource(kafkaMsg);
         String                              messageUser           = message.getUser();
         long                                startTime             = System.currentTimeMillis();
         AtlasMetricsUtil.NotificationStat   stats                 = new AtlasMetricsUtil.NotificationStat();
         AuditFilter.AuditLog                auditLog              = null;
         boolean                             importRequestComplete = false;
+        boolean                             ingestionSucceeded    = true;
 
         if (authorizeUsingMessageUser) {
             setCurrentUser(messageUser);
@@ -455,6 +458,8 @@ public class SerialEntityProcessor implements NotificationEntityProcessor {
                 return new TopicPartitionOffsetResult(kafkaMsg.getTopicPartition(), kafkaMsg.getOffset());
             }
 
+            IngestionMetrics.recordRequest(ingestionMessageType, metadataSource);
+
             final String threadName = Thread.currentThread().getName();
 
             // Used for intermediate conversions during create and update
@@ -472,6 +477,7 @@ public class SerialEntityProcessor implements NotificationEntityProcessor {
 
                     requestContext.setUser(messageUser, null);
                     requestContext.setInNotificationProcessing(true);
+                    requestContext.setIngestionMetadataSource(metadataSource);
                     requestContext.setCreateShellEntityForNonExistingReference(createShellEntityForNonExistingReference);
 
                     LOG.debug("Parallel Processing-{}: Starting attempt={}/{} for message type={}, topic={}, offset={}, msgCreationTime={}",
@@ -635,6 +641,9 @@ public class SerialEntityProcessor implements NotificationEntityProcessor {
                             try {
                                 asyncImporter.onImportTypeDef(typesDef, importId);
                             } catch (AtlasBaseException abe) {
+                                ingestionSucceeded = false;
+
+                                IngestionMetrics.recordFailure(ingestionMessageType, metadataSource, abe);
                                 LOG.error("IMPORT_TYPE_DEF: {} failed to import type definition: {}", importId, typesDef.toString());
 
                                 asyncImporter.onImportComplete(importId);
@@ -654,8 +663,10 @@ public class SerialEntityProcessor implements NotificationEntityProcessor {
                             try {
                                 importRequestComplete = asyncImporter.onImportEntity(entityWithExtInfo, importId, position);
                             } catch (AtlasBaseException abe) {
+                                ingestionSucceeded = false;
                                 importRequestComplete = true;
 
+                                IngestionMetrics.recordFailure(ingestionMessageType, metadataSource, abe);
                                 LOG.error("IMPORT_ENTITY: {} failed to import entity: {}", importId, entityImportNotification);
                             } finally {
                                 if (importRequestComplete) {
@@ -675,6 +686,10 @@ public class SerialEntityProcessor implements NotificationEntityProcessor {
                                 exceptionClassName, kafkaMsg.getOffset(), numRetries, adaptiveWaiter.getWaitDuration());
                         exceptionClassName = StringUtils.EMPTY;
                     }
+
+                    if (ingestionSucceeded) {
+                        IngestionMetrics.recordDuration(ingestionMessageType, metadataSource, System.currentTimeMillis() - startTime);
+                    }
                     break;
                 } catch (Throwable e) {
                     RequestContext.get().resetEntityGuidUpdates();
@@ -686,18 +701,22 @@ public class SerialEntityProcessor implements NotificationEntityProcessor {
                     if (!isRetryable) {
                         // Non-retryable exceptions: fail fast and move to next message
                         if (e instanceof InterruptedException) {
+                            IngestionMetrics.recordFailure(ingestionMessageType, metadataSource, e);
                             LOG.error("Interrupted!", e);
                             return null;
                         } else if (e instanceof org.apache.atlas.repository.graphdb.AtlasSchemaViolationException) {
+                            IngestionMetrics.recordFailure(ingestionMessageType, metadataSource, e);
                             LOG.warn("{} - {}: Non-retryable {}: Skipping message: {}",
                                     kafkaMsg.getTopicPartition().toString(), kafkaMsg.getOffset(), exceptionClassName, e.getMessage());
                             return new TopicPartitionOffsetResult(kafkaMsg.getTopicPartition(), kafkaMsg.getOffset());
                         } else if (e instanceof AtlasBaseException) {
                             AtlasBaseException baseException = (AtlasBaseException) e;
+                            IngestionMetrics.recordFailure(ingestionMessageType, metadataSource, e);
                             LOG.warn("Error handling message: {}: {} - {} - {}",
                                     ticket.getMessage().getMessage().getType(), baseException.getAtlasErrorCode(), baseException.getMessage(), ticket.getQualifiedNamesSet());
                             return new TopicPartitionOffsetResult(kafkaMsg.getTopicPartition(), kafkaMsg.getOffset());
                         } else {
+                            IngestionMetrics.recordFailure(ingestionMessageType, metadataSource, e);
                             LOG.error("Non-retryable exception: {}", exceptionClassName, e);
                             return new TopicPartitionOffsetResult(kafkaMsg.getTopicPartition(), kafkaMsg.getOffset());
                         }
@@ -710,6 +729,7 @@ public class SerialEntityProcessor implements NotificationEntityProcessor {
                         LOG.warn("Offset: {}: Max retries: {} exceeded for message {}", kafkaMsg.getOffset(), maxRetries, strMessage, e);
 
                         stats.isFailedMsg = true;
+                        IngestionMetrics.recordFailure(ingestionMessageType, metadataSource, e);
 
                         failedMessages.add(strMessage);
 
@@ -719,6 +739,8 @@ public class SerialEntityProcessor implements NotificationEntityProcessor {
 
                         return new TopicPartitionOffsetResult(kafkaMsg.getTopicPartition(), kafkaMsg.getOffset());
                     }
+
+                    IngestionMetrics.recordRetryAttempt(ingestionMessageType, metadataSource, e);
 
                     if (isTransactionRelatedError(e)) {
                         // Retryable exceptions: perform rollback, clear cache, and retry
@@ -1091,6 +1113,12 @@ public class SerialEntityProcessor implements NotificationEntityProcessor {
         }
 
         return ret;
+    }
+
+    private String getMetadataSource(AtlasKafkaMessage<HookNotification> kafkaMsg) {
+        String source = kafkaMsg != null ? kafkaMsg.getSource() : null;
+
+        return IngestionMetrics.normalizeMetadataSource(source);
     }
 
     private void recordProcessedEntities(EntityMutationResponse mutationResponse, NotificationStat stats, PreprocessorContext context) {

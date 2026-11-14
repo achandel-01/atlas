@@ -78,6 +78,7 @@ public class EntityNotificationListenerV2 implements EntityChangeListenerV2 {
 
     @Override
     public void onEntitiesAdded(List<AtlasEntity> entities, boolean isImport) throws AtlasBaseException {
+        recordIngestionEntities(entities);
         notifyEntityEvents(entities, ENTITY_CREATE);
     }
 
@@ -187,6 +188,16 @@ public class EntityNotificationListenerV2 implements EntityChangeListenerV2 {
 
         sendNotifications(operationType, messages);
         RequestContext.get().endMetricRecord(metric);
+    }
+
+    private void recordIngestionEntities(List<AtlasEntity> entities) {
+        if (CollectionUtils.isNotEmpty(entities) && RequestContext.get().isInNotificationProcessing()) {
+            IngestionMetrics.recordEntities(getIngestionMetadataSource(), entities.size());
+        }
+    }
+
+    private String getIngestionMetadataSource() {
+        return IngestionMetrics.normalizeMetadataSource(RequestContext.get().getIngestionMetadataSource());
     }
 
     private void notifyRelationshipEvents(List<AtlasRelationship> relationships, OperationType operationType) throws AtlasBaseException {

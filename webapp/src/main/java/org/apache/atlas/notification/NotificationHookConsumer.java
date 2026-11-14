@@ -193,6 +193,7 @@ public class NotificationHookConsumer implements Service, ActiveStateChangeHandl
         //Allow for completion of outstanding work
         try {
             if (consumerDisabled && consumers.isEmpty()) {
+                KafkaMetrics.stop();
                 return;
             }
 
@@ -208,6 +209,7 @@ public class NotificationHookConsumer implements Service, ActiveStateChangeHandl
             }
 
             notificationInterface.close();
+            KafkaMetrics.stop();
         } catch (InterruptedException e) {
             LOG.error("Failure in shutting down consumers");
         }
@@ -405,6 +407,8 @@ public class NotificationHookConsumer implements Service, ActiveStateChangeHandl
         if (executors == null) {
             throw new IllegalStateException("Executors must be initialized before starting consumers.");
         }
+
+        KafkaMetrics.start();
 
         for (final HookConsumer consumer : hookConsumers) {
             consumers.add(consumer);
@@ -650,12 +654,14 @@ public class NotificationHookConsumer implements Service, ActiveStateChangeHandl
             long commitOffset = kafkaMessage.getOffset() + 1;
             lastCommittedPartitionOffset.put(kafkaMessage.getTopicPartition(), commitOffset);
             consumer.commit(kafkaMessage.getTopicPartition(), commitOffset);
+            KafkaMetrics.updateProcessedOffset(kafkaMessage.getTopicPartition(), commitOffset);
         }
 
         private void commit(TopicPartition topicPartition, long commitOffset) {
             long offsetToCommit = commitOffset + 1;
             consumer.commit(topicPartition, offsetToCommit);
             lastCommittedPartitionOffset.put(topicPartition, commitOffset);
+            KafkaMetrics.updateProcessedOffset(topicPartition, offsetToCommit);
             if (LOG.isDebugEnabled()) {
                 LOG.debug("Committing: topicPartition: {} with offset: {}", topicPartition, offsetToCommit);
             }

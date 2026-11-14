@@ -80,6 +80,7 @@ public class RequestContext {
     private int          attemptCount           = 1;
     private Long         createEventMsgTime;
     private Long         deleteEventMsgTime;
+    private String       ingestionMetadataSource;
 
     private RequestContext() {
     }
@@ -238,6 +239,14 @@ public class RequestContext {
 
     public void setInNotificationProcessing(boolean inNotificationProcessing) {
         isInNotificationProcessing = inNotificationProcessing;
+    }
+
+    public String getIngestionMetadataSource() {
+        return ingestionMetadataSource;
+    }
+
+    public void setIngestionMetadataSource(String ingestionMetadataSource) {
+        this.ingestionMetadataSource = ingestionMetadataSource;
     }
 
     public boolean isInTypePatching() {
